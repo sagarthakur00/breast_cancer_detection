@@ -75,3 +75,6 @@ Can be used directly or train a different by defining a different model in the m
 
 #### Training and validation loss (logged on tensorboard)
 <img src="images/train_val_loss.png"/>
+
+
+conda create --name bcdp python=3.6
