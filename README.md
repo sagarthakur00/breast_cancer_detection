@@ -149,16 +149,24 @@ bcdp\Scripts\activate           # Windows
 
 ```bash
 pip install -r requirements.txt
-pip install pandas kaggle
 ```
 
-`requirements.txt` includes:
+`requirements.txt` includes everything needed for training, the backend API, and the frontend UI:
 ```
-torch>=1.1
-torchvision
-numpy
-tqdm
-tensorboard>=1.14
+torch>=2.0.0          # Model training & inference
+torchvision>=0.15.0
+numpy>=1.24.0
+pillow>=10.0.0
+fastapi>=0.110.0      # Backend API
+uvicorn[standard]     # ASGI server
+python-multipart      # File upload support
+pydantic>=2.0.0
+streamlit>=1.32.0     # Frontend UI
+requests>=2.31.0
+tqdm>=4.65.0          # Training progress bars
+tensorboard>=2.14.0   # Training visualization
+pandas>=2.0.0
+kaggle>=1.6.0         # Dataset download
 ```
 
 ---
@@ -275,271 +283,200 @@ This outputs **loss**, **accuracy**, and **top-k accuracy** on the test set.
 
 ## 🌐 Deployment
 
-This section explains how to turn the trained model into a **web application** that any user can access — no coding required on their end.
+The project ships a fully working **FastAPI backend** and **Streamlit frontend** that you can run locally or deploy to the cloud. Both live inside the repo — no extra setup needed beyond `pip install -r requirements.txt`.
 
-### Architecture Overview
+### Architecture
 
 ```
 User's Browser
-     │
-     │  Upload image
-     ▼
-┌─────────────────┐        ┌──────────────────────────┐
-│   Frontend UI   │──────▶│   Backend API (FastAPI)   │
-│   (Streamlit)   │◀──────│   Loads model_best.pth    │
-└─────────────────┘  JSON  │   Returns prediction      │
-                           └──────────────────────────┘
+      │
+      │  Upload histopathology image
+      ▼
+┌──────────────────────┐     POST /predict      ┌──────────────────────────────┐
+│  Streamlit Frontend  │  ─────────────────────▶ │  FastAPI Backend             │
+│  frontend/           │ ◀───────────────────── │  backend/app.py              │
+│  streamlit_app.py    │  JSON: prediction +     │  Loads model_best.pth        │
+└──────────────────────┘  confidence score       │  Runs DenseNet-121 inference │
+                                                 └──────────────────────────────┘
 ```
 
 ---
 
-### 🔧 Backend — FastAPI
-
-#### Folder structure
-
-```
-deployment/
-├── backend/
-│   ├── app.py              ← FastAPI app
-│   ├── model_best.pth      ← Copy your trained model here
-│   └── requirements.txt
-└── frontend/
-    ├── app.py              ← Streamlit UI
-    └── requirements.txt
-```
-
-#### `deployment/backend/app.py`
-
-```python
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-import torch
-import torchvision.models as models
-import torch.nn as nn
-from torchvision import transforms
-from PIL import Image
-import io
-
-app = FastAPI(title="Breast Cancer Detection API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
-# Load model
-model = models.densenet121(pretrained=False)
-model.classifier = nn.Linear(1024, 2)
-checkpoint = torch.load("model_best.pth", map_location="cpu")
-model.load_state_dict(checkpoint["state_dict"])
-model.eval()
-
-CLASSES = ["Benign", "Malignant"]
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
-])
-
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = transform(image).unsqueeze(0)
-
-    with torch.no_grad():
-        outputs = torch.softmax(model(tensor), dim=1)
-        confidence, predicted = torch.max(outputs, 1)
-
-    return {
-        "prediction": CLASSES[predicted.item()],
-        "confidence": f"{confidence.item() * 100:.2f}%"
-    }
-```
-
-#### `deployment/backend/requirements.txt`
-
-```
-fastapi
-uvicorn
-torch
-torchvision
-pillow
-python-multipart
-```
-
-#### Start the backend server
-
-```bash
-cd deployment/backend
-pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-
-# API docs available at: http://localhost:8000/docs
-```
-
----
-
-### 🎨 Frontend — Streamlit
-
-#### `deployment/frontend/app.py`
-
-```python
-import streamlit as st
-import requests
-from PIL import Image
-import io
-
-st.set_page_config(page_title="Breast Cancer Detector", page_icon="🔬")
-
-st.title("🔬 Breast Cancer Detection")
-st.markdown("Upload a histopathology image to classify it as **Benign** or **Malignant**.")
-
-BACKEND_URL = "http://localhost:8000/predict"
-
-uploaded_file = st.file_uploader("Choose an image...", type=["png", "jpg", "jpeg"])
-
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-
-    with st.spinner("Analyzing..."):
-        response = requests.post(
-            BACKEND_URL,
-            files={"file": (uploaded_file.name, uploaded_file.getvalue(), "image/png")}
-        )
-
-    if response.status_code == 200:
-        result = response.json()
-        label = result["prediction"]
-        confidence = result["confidence"]
-
-        if label == "Malignant":
-            st.error(f"🚨 Prediction: **{label}**  |  Confidence: {confidence}")
-        else:
-            st.success(f"✅ Prediction: **{label}**  |  Confidence: {confidence}")
-    else:
-        st.error("Error connecting to backend.")
-```
-
-#### `deployment/frontend/requirements.txt`
-
-```
-streamlit
-requests
-pillow
-```
-
-#### Start the frontend UI
-
-```bash
-cd deployment/frontend
-pip install -r requirements.txt
-streamlit run app.py
-
-# Opens automatically at: http://localhost:8501
-```
-
----
-
-### 🖥️ Running the Full App Locally
-
-Open **two terminals**:
-
-**Terminal 1 — Backend:**
-```bash
-cd deployment/backend
-uvicorn app:app --host 0.0.0.0 --port 8000
-```
-
-**Terminal 2 — Frontend:**
-```bash
-cd deployment/frontend
-streamlit run app.py
-```
-
-Then open your browser at **http://localhost:8501**, upload a histopathology image, and get an instant prediction!
-
----
-
-### ☁️ Deploying Online (Free Options)
-
-#### Option 1 — Hugging Face Spaces (Easiest, Free)
-
-Hugging Face Spaces supports Streamlit apps natively.
-
-1. Create a free account at [huggingface.co](https://huggingface.co)
-2. Create a new **Space** → select **Streamlit**
-3. Upload your `app.py`, `model_best.pth`, and `requirements.txt`
-4. Your app goes live at `https://huggingface.co/spaces/<username>/<space-name>`
-
-> **Note:** For HF Spaces, modify `app.py` to load the model directly (no separate backend needed) for simplicity.
-
-#### Option 2 — Render (Backend + Frontend)
-
-1. Push your `deployment/` folder to GitHub
-2. Go to [render.com](https://render.com) → **New Web Service**
-3. Connect your GitHub repo
-4. **Backend service:**
-   - Build command: `pip install -r requirements.txt`
-   - Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
-5. **Frontend service:** Deploy similarly with `streamlit run app.py --server.port $PORT`
-
-#### Option 3 — Railway (One-click deploy)
-
-1. Go to [railway.app](https://railway.app)
-2. Click **New Project → Deploy from GitHub**
-3. Select your repo, Railway auto-detects the service
-4. Set environment variables if needed and deploy
-
----
-
-## 📁 Project Structure
+### 📁 Project Structure
 
 ```
 breast_cancer_detection/
 │
-├── base/                       # Abstract base classes
-│   ├── base_data_loader.py
-│   ├── base_model.py
-│   └── base_trainer.py
+├── backend/                        # FastAPI prediction server
+│   ├── __init__.py
+│   ├── app.py                      # API routes (/predict, /health)
+│   └── model_loader.py             # Loads model_best.pth at startup
 │
-├── data_loader/
-│   └── data_loaders.py         # BreakHis dataset loader
+├── frontend/                       # Streamlit web UI
+│   └── streamlit_app.py            # Upload image → call API → show result
 │
-├── model/
-│   ├── model.py                # DenseNet-121 + ResNet definitions
-│   ├── loss.py                 # Cross entropy loss
-│   └── metric.py               # Accuracy metrics
+├── base/                           # Abstract base classes (training)
+├── data_loader/                    # BreakHis dataset loader
+├── model/                          # DenseNet-121 & loss definitions
+├── trainer/                        # Training loop
+├── logger/                         # TensorBoard writer
+├── utils/                          # Utility functions
 │
-├── trainer/
-│   └── trainer.py              # Training loop
+├── images/                         # Sample images & training plots
+├── saved/                          # Checkpoints & logs (gitignored)
+├── data/                           # Dataset (gitignored)
 │
-├── logger/
-│   └── logger.py               # Logging + TensorBoard writer
-│
-├── utils/
-│   └── util.py                 # Utility functions
-│
-├── deployment/                 # Web app (add after training)
-│   ├── backend/
-│   │   ├── app.py              # FastAPI prediction server
-│   │   └── requirements.txt
-│   └── frontend/
-│       ├── app.py              # Streamlit UI
-│       └── requirements.txt
-│
-├── images/                     # Sample images & training plots
-├── saved/                      # Model checkpoints & logs (gitignored)
-├── data/                       # Dataset (gitignored)
-├── config.json                 # Training configuration
-├── train.py                    # Training entry point
-├── test.py                     # Evaluation entry point
-├── parse_config.py             # Config parser
-└── requirements.txt
+├── model_best.pth                  # Trained model weights (27 MB)
+├── config.json                     # Training configuration
+├── train.py                        # Training entry point
+├── test.py                         # Evaluation entry point
+├── parse_config.py                 # Config parser
+└── requirements.txt                # All dependencies
 ```
+
+---
+
+### 🖥️ Run the App Locally
+
+#### Step 1 — Clone & install
+
+```bash
+git clone https://github.com/sagarthakur00/breast_cancer_detection.git
+cd breast_cancer_detection
+
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+#### Step 2 — Start the backend (Terminal 1)
+
+```bash
+# From the project root
+uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+The API will be live at **http://localhost:8000**
+Interactive docs at **http://localhost:8000/docs**
+
+#### Step 3 — Start the frontend (Terminal 2)
+
+```bash
+# From the project root
+streamlit run frontend/streamlit_app.py
+```
+
+Opens automatically at **http://localhost:8501**
+
+#### Step 4 — Upload an image
+
+1. Open **http://localhost:8501** in your browser
+2. Click **"Browse files"** and upload any PNG/JPG histopathology image
+3. The app sends the image to the backend and displays:
+   - ✅ **Benign** or 🚨 **Malignant** label
+   - Confidence score (e.g. `99.33%`)
+   - Class probability bar chart
+
+---
+
+### 🔌 API Reference
+
+**`POST /predict`**
+
+Upload an image and receive a JSON prediction.
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -F "file=@your_image.png"
+```
+
+**Response:**
+```json
+{
+  "prediction": "Malignant",
+  "confidence": 0.9933,
+  "confidence_pct": "99.33%",
+  "all_scores": {
+    "Benign": 0.0067,
+    "Malignant": 0.9933
+  }
+}
+```
+
+**`GET /health`** — Check if the server and model are loaded
+
+```json
+{ "status": "ok", "model_loaded": true, "device": "cpu" }
+```
+
+---
+
+### ☁️ Deploy Online (Free)
+
+#### Option 1 — Hugging Face Spaces ⭐ Recommended
+
+Best for sharing a demo — supports Streamlit natively, free tier available.
+
+1. Create a free account at [huggingface.co](https://huggingface.co)
+2. Go to **New Space → Streamlit**
+3. Upload these files to the Space:
+   - `frontend/streamlit_app.py` → rename to `app.py` at root
+   - `backend/model_loader.py`
+   - `model_best.pth`
+   - `requirements.txt`
+4. In `app.py`, change the backend call to load the model directly (no separate FastAPI needed on HF Spaces):
+
+```python
+# HF Spaces: load model inline instead of calling a separate API
+from backend.model_loader import load_model, CLASSES
+import torch
+from torchvision import transforms
+from PIL import Image
+
+model = load_model(torch.device("cpu"))
+# ... run inference directly
+```
+
+5. Your app goes live at:
+   `https://huggingface.co/spaces/<your-username>/<space-name>`
+
+---
+
+#### Option 2 — Render (Full Backend + Frontend)
+
+Deploy the backend API as a Web Service and the frontend as a separate static/web service.
+
+1. Push this repo to GitHub (already done ✅)
+2. Go to [render.com](https://render.com) → **New → Web Service**
+3. Connect your GitHub repo
+
+**Backend service settings:**
+| Field | Value |
+|---|---|
+| Root Directory | *(leave blank)* |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `uvicorn backend.app:app --host 0.0.0.0 --port $PORT` |
+
+**Frontend service settings:**
+| Field | Value |
+|---|---|
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `streamlit run frontend/streamlit_app.py --server.port $PORT --server.address 0.0.0.0` |
+| Environment Variable | `BACKEND_URL=https://your-backend.onrender.com` |
+
+> The `BACKEND_URL` env var is read automatically by `streamlit_app.py`.
+
+---
+
+#### Option 3 — Railway
+
+1. Go to [railway.app](https://railway.app) → **New Project → Deploy from GitHub**
+2. Select your `breast_cancer_detection` repo
+3. Add two services — one for backend, one for frontend
+4. Set start commands as above
+5. Set `BACKEND_URL` environment variable on the frontend service to point at the backend Railway URL
+6. Railway auto-detects Python and deploys — your app is live in minutes
 
 ---
 
